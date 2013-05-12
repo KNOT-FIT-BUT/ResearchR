@@ -1,0 +1,8 @@
+# built application files
+*.pyc
+
+help files
+keys
+keysExample
+publicationsNames
+.backup

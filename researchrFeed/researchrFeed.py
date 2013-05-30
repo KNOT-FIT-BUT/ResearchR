@@ -8,6 +8,8 @@ import unicodedata
 from StringIO import StringIO
 from time import strptime
 import logging
+import random
+import time
 
 from rrslib.db.model import *
 from rrslib.db.dbal import PostgreSQLDatabase, FluentSQLQuery
@@ -63,15 +65,9 @@ class ResearchrPublicationFeeder:
 		#nastaveni pro importer
 		self.importer_kwargs = importer_kwargs
 
-		#objekt pro posilani SQL dotazu na db
-		#objekt pro posilani SQL dotazu na db
-		self.db = PostgreSQLDatabase(self.importer_kwargs['logfile'])
-		self.db.connect(host=config.get("Database","host"),
-			dbname=config.get("Database","db"),
-			user=config.get("Database","user"),
-			password=config.get("Database","pass"))
-		self.db.set_schema(config.get("Database","schema"))
-	
+		self.LimitMin = 0.5
+		self.LimitMax = 2
+
 		#objekt pro vytvareni sql dotazu
 		self.q = FluentSQLQuery()
 
@@ -256,6 +252,7 @@ class ResearchrPublicationFeeder:
 		self.rPublication = RPublication()
 		#get data via api
 		publicationData = self.researchrClass.getPublication(name)
+		time.sleep(random.uniform(self.LimitMin, self.LimitMax))
 		print(publicationData)
 		for key, value in publicationData.items():
 			if key == 'abstract':

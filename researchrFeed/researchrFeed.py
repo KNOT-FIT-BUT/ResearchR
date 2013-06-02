@@ -14,7 +14,7 @@ import time
 from rrslib.db.model import *
 from rrslib.db.dbal import PostgreSQLDatabase, FluentSQLQuery
 from rrslib.db.xmlimport import RRSXMLImporter, LOOKUP_FAST, LOOKUP_PRECISE
-from rrslib.db.dbal import PostgreSQLDatabase, RRSDatabase, RRSDB_MISSING, EXEC_LOG
+from rrslib.db.dbal import PostgreSQLDatabase, RRSDatabase, DatabaseError, RRSDB_MISSING, EXEC_LOG
 from rrslib.extractors.normalize import Normalize
 from rrslib.xml.xmlconverter import Model2XMLConverter
 
@@ -65,182 +65,261 @@ class ResearchrPublicationFeeder:
 		#nastaveni pro importer
 		self.importer_kwargs = importer_kwargs
 
+		#sleeper range
 		self.LimitMin = 0.5
 		self.LimitMax = 2
 
 		#objekt pro vytvareni sql dotazu
 		self.q = FluentSQLQuery()
 
-		#API
+		#researchr API
 		self.researchrClass = ResearchrClass()
-
-		#vazby N:N
-		self.publicationPerson = RRSRelationshipPersonPublication()
 
 		#nejvyssi vrstva, pro nacteni objektu podle id
 		self.rrsdb = RRSDatabase()
 
 		#normalizator
 		self.norm = Normalize()
-
-	def checkIfImport(self, name):
-		self.q.select("id").from_table("publication")
-		self.q.where("researchr_key=", name)
-		self.q()
-		data = self.q.fetch_one()
-		self.q.cleanup()
-		return data
+		
+		#importer
+		self.importer = RRSXMLImporter(self.importer_kwargs)
 
 	def __FillType(self):
-		self.q.select("id").from_table("publication_type")
-		self.q.where("type=", self.rPublication.publication_type)
-		self.q()
-		data = self.q.fetch_one()
-		self.q.cleanup()
-		if (data != None):
-			self.publication.set("type", self.rrsdb.load("publication_type", data[0]))
+		"""
+		Transform rPublication.type to publication.type
+		"""
+		_id = self.__GetId("publication_type", "type=", self.rPublication.publication_type)
+		if (_id != None):
+			self.publication["type"] = self.rrsdb.load("publication_type", _id)
 	
 
 	def __FillSeries(self):
+		"""
+		Add rPublication.series to publication_series table
+		"""
 		if (self.rPublication.series != None and self.rPublication.series != ""):
-			data = None
-			while (data == None):
-				#ziskame series_id
-				self.q.select("id").from_table("publication_series")
-				self.q.where("title=", self.rPublication.series)
-				self.q()
-				data = self.q.fetch_one()
-				self.q.cleanup()
-				if (data == None):
-					#pridame zaznam do tabulky series
-					series = RRSPublication_series()
-					series.set("title", self.rPublication.series)
-					importer = RRSXMLImporter(self.importer_kwargs)
-					importer.import_model(series)
+			_id = None
+			while (_id == None):
+				_id = self.__GetId("publication_series", "title=", self.rPublication.series)
+				if (_id == None):
+					series = RRSPublication_series(title=self.rPublication.series)
+					self.importer.import_model(series)
 					continue
-			self.publication.set("series", self.rrsdb.load("publication_series", data[0]))
+			self.publication["series"] = self.rrsdb.load("publication_series", _id)
 			
 
+	def __GetId(self, _from, where, _is):
+		"""
+		Try to find ID in table and return it
+		
+		@type  _from: string
+		@param _from: Name of table.
+		@type  where: string
+		@param where: Name of column.
+		@type  _is: string
+		@param _is: What it is equal.
+		@rtype:   int
+		@return:  Id of selected entry.
+		"""
+		self.q.select("id").from_table(_from)
+		self.q.where(where, _is)
+		self.q()
+		data = self.q.fetch_one()
+		#print(self.q.sql())
+		self.q.cleanup()
+		if data != None:
+			return data[0]
+		return None
+	
 	def __FillPublisher(self):
+		"""
+		Add rPublication.publisher to organization table
+		"""
 	 	if (self.rPublication.publisher != None and self.rPublication.publisher != ""):
-			data = None
+			_id = None
 			normalized_title = self.norm.organization(self.rPublication.publisher)
-			while (data == None):
-				self.q.select("id").from_table("organization")
-				self.q.where("title_normalized=", normalized_title)
-				self.q()
-				data = self.q.fetch_one()
-				self.q.cleanup()
-				if (data == None):
-					organization = RRSOrganization(title=self.rPublication.publisher, title_normalized=normalized_title)
+			while (_id == None):
+				_id = self.__GetId("organization", "title_normalized=", normalized_title)
+				if (_id == None):
+					organization = RRSOrganization(title=self.rPublication.publisher, 
+						title_normalized=normalized_title)
 					importer = RRSXMLImporter(self.importer_kwargs)
 					importer.import_model(organization)
 					continue
-				self.publication["publisher"] = self.rrsdb.load("organization", data[0])
-	"""
-	FillAuthor Add (if there are not) person to db and 
-	contain them with actual publication. Foreach
-	 rPublication.authors, take only person's url and fullname.
-	"""
-	def __FillAuthors(self):
-		if (len(self.rPublication.authors) != 0):
-			for author in self.rPublication.authors:
-				data = None
-				personUrls = RRSRelationshipPersonUrl()
-				if "person" not in author:
-					continue
-				rFullname = author["person"]["fullname"]
-				rUrl = author["person"]["url"]
-				while (data == None):
-					#pokusime se ziskat url id
-					self.q.select("id").from_table("url")
-					self.q.where("link=", rUrl)
-					self.q()
-					data = self.q.fetch_one()
-					self.q.cleanup()
-					if (data == None):
-						#pokud url v db jeste neni, pridame ji
-						url = RRSUrl(link=rUrl)
-						urlType = self.rrsdb.load("url_type", "1")
-						url.set("type", urlType)
-						importer = RRSXMLImporter(self.importer_kwargs)
-						importer.import_model(url)
-						continue
-					url = self.rrsdb.load("url", data[0])
-					personUrls.set_entity(url)
-				data = None
-				while (data == None):
-					#ziskame person_id
-					self.q.select("id").from_table("person")
-		       			self.q.where("full_name=", rFullname)
-			       		self.q()
-			       		data = self.q.fetch_one()
-			       		self.q.cleanup()
-					if (data == None):
-						#pridame zaznam do tabulky person
-						person = RRSPerson()
-						person.full_name = rFullname
-						splitName = rFullname.split()
-						if (len(splitName) == 3):
-							person.first_name = splitName[0]
-							person.middle_name = splitName[1]
-							person.last_name = splitName[2]
-						elif (len(splitName) == 2):
-							person.first_name = splitName[0]
-							person.last_name = splitName[1]
-						person.full_name_ascii = unicodedata.normalize('NFKD', rFullname).encode('ascii', 'ignore')
-						importer = RRSXMLImporter(self.importer_kwargs)
-						importer.import_model(person)
-						continue
-					person = self.rrsdb.load("person", data[0])
-					self.publicationPerson.set_entity(person)
+				self.publication["publisher"] = self.rrsdb.load("organization", _id)
 
-	def FillPublication(self, name):
+	def __FillAuthors(self, authorData, isEditor):
+		"""
+       		FillAuthor Add (if there are not) person to db and
+       		contain them with actual publication. Foreach
+		rPublication.authors, take only person's url and fullname.
+		
+		@type  authorData: list
+		@param authorData: List of authors data (person, alias)
+		@type  isEditor: bool
+		@param isEditor: True if authors are editors of this publication.
+		"""
+		if (len(authorData) != 0):
+			rank = 0
+			for author in authorData:
+				keyAuthorExist = False
+				
+				"""
+				for key, value in author.items():
+					if (key == "author"):
+						keyAuthorExist = True
+				if keyAuthorExist is False:
+					rFullname = author["alias"]["name"]
+					rUrl = author["alias"]["url"]
+				else:
+					rFullname = author["person"]["fullname"]
+			       		rUrl = author["person"]["url"]
+				"""
+				if 'author' in author:
+					rFullname = author["person"]["fullname"]
+					rUrl = author["person"]["url"]
+				else:
+					rFullname = author["alias"]["name"]
+					rUrl = author["alias"]["url"]
+
+				personUrl = RRSRelationshipPersonUrl()
+				rank += 1
+				importer = RRSXMLImporter(self.importer_kwargs)
+				self.__FillUrl(personUrl, rUrl, importer)
+				self.__FillPerson(personUrl, rFullname, rank, isEditor, importer)
+
+	def __FillUrl(self, personUrl, rUrl, importer):
+		"""
+		This function add url to db bind url to person 
+
+		@type  personUrl: RRSRelationshipPersonUrl
+		@param personUrl: Relationship object to add url into it.
+		@type  rUrl: string
+		@param isEditor: rPublication.(person/alias) url, url of author/editor.
+		"""
+		_id = None
+		while (_id == None):
+			_id = self.__GetId("url", "link=", rUrl)
+			if (_id == None):	
+				url = RRSUrl(link=rUrl)
+				url["type"] = self.rrsdb.load("url_type", "1")
+				#importer = RRSXMLImporter(self.importer_kwargs)
+				self.importer.import_model(url)	
+				continue
+			url = self.rrsdb.load("url", _id)
+			personUrl.set_entity(url)
+			#print( personUrl)
+
+	def __FillPerson(self, personUrl, rFullname, rank, isEditor, importer):
+		"""
+		This function try fill first name, middle name, last name of person.
+
+		@type  personUrl: RRSRelationshipPersonUrl
+		@param personUrl: Relationship object to bind to person["url"].
+		@type  rFullname: string
+		@param rFullname: Fullname of author.
+		@type  rank: int
+		@param rank: Rank of author, first author get 1, second 2 and so on.
+		@type  isEditor: bool
+		@param isEditor: True if person is editor of this publication.
+		"""
+		_id = None
+		while (_id == None):
+			_id = self.__GetId("person", "full_name=", rFullname)
+			if (_id == None):
+				person = RRSPerson()
+				person["full_name"] = rFullname
+				person["url"] = personUrl
+				self.__SetPersonNames(person, rFullname)
+				person["full_name_ascii"] = unicodedata.normalize('NFKD', rFullname).encode('ascii', 'ignore')
+				#importer = RRSXMLImporter(self.importer_kwargs)
+				print(person)
+				importer.import_model(person)
+				continue
+			publicationPerson = RRSRelationshipPersonPublication(author_rank=rank, editor=isEditor)
+			publicationPerson.set_entity(self.rrsdb.load("person", _id))
+			#print(publicationPerson)
+			self.publication['person'].append(publicationPerson)
+
+	def __SetPersonNames(self, person, rFullname):
+		"""
+		This function try fill first name, middle name, last name of person.
+
+		@type  person: RRSPerson
+		@param person: Object of author of publication.
+		@type  rFullname: string
+		@param rFullname: Fullname of author.
+		"""
+		splitName = rFullname.split()
+		if (len(splitName) == 3):
+			person["first_name"] = splitName[0]
+			person["middle_name"] = splitName[1]
+			person["last_name"] = splitName[2]
+		elif (len(splitName) == 2):
+			person["first_name"] = splitName[0]
+			person["last_name"] = splitName[1]
+
+	def FillPublication(self, key):
 		"""
 		This function call all private function with prefix Fill, 
-		this function assign data from rPublication to publication(RRSPublication).
+		this function load data to rPublication structure and then 
+		assign data from rPublication to publication(RRSPublication).
+		
+		@type  key: string
+		@param key: Key of the publication.
 		"""
-		self.__FillRPublication(name)
+		self.__FillRPublication(key)
 		self.publication = RRSPublication()
-		self.__FillAuthors()
+		self.__FillAuthors(self.rPublication.authors, False)
+		self.__FillAuthors(self.rPublication.editors, True)
 		self.__FillPublisher()
 		self.__FillType()
 		self.__FillSeries()
-		self.publication.set('title', self.rPublication.title)
-		self.publication.set('title_normalized', self.norm.publication(self.rPublication.title))
+		self.publication["title"] = self.rPublication.title
+		self.publication["title_normalized"] = self.norm.publication(self.rPublication.title)
 
-		if (self.rPublication.year != None and self.rPublication.year != ''):
-			self.publication.set('year', int(self.rPublication.year)) # 2000 -> 2000
+		if (self.rPublication.year != None and self.rPublication.year != ""):
+			self.publication["year"] = int(self.rPublication.year) # "2000" -> 2000
 
-		if (self.rPublication.month != None and self.rPublication.month != ''):
-			print(strptime(self.rPublication.month[:3],'%b').tm_mon)# "January" -> "Jan" -> 1
-			self.publication.set('month', int(strptime(self.rPublication.month[:3],'%b').tm_mon))
-		if (self.rPublication.volume != None and self.rPublication.volume != '' and self.rPublication.volume.isdigit()):
-			self.publication.set('volume', int(self.rPublication.volume))
+		if (self.rPublication.month != None and self.rPublication.month != ""):
+			self.publication["month"] = int(strptime(self.rPublication.month[:3],'%b').tm_mon)
 
-		if (self.rPublication.number != None and self.rPublication.number != ''):
-			self.publication.set('number', self.rPublication.number)
+		if (self.rPublication.volume != None and self.rPublication.volume != "" and self.rPublication.volume.isdigit()):
+			self.publication["volume"] = int(self.rPublication.volume)
 
-		if (self.rPublication.abstract != None and self.rPublication.abstract != ''):
-			self.publication.set('abstract', self.rPublication.abstract)
+		if (self.rPublication.number != None and self.rPublication.number != "" and self.rPublication.volume.isdigit()):
+			self.publication["number"] = int(self.rPublication.number)
 
-		if (self.rPublication.doi != None and self.rPublication.doi != '' and "http://dx.doi.org/" in self.rPublication.doi):
-			self.publication.set('doi', self.rPublication.doi.strip('http://dx.doi.org/'))
+		if (self.rPublication.abstract != None and self.rPublication.abstract != ""):
+			self.publication["abstract"] = self.rPublication.abstract
+
+		if (self.rPublication.doi != None and "http://dx.doi.org/" in self.rPublication.doi):
+			self.publication["doi"] = self.rPublication.doi.strip('http://dx.doi.org/')
 
 		if (self.rPublication.firstpage != None and self.rPublication.lastpage != None and 
-			self.rPublication.firstpage != '' and self.rPublication.lastpage != ''):
-			self.publication.set('pages', str(self.rPublication.firstpage) + " - " + str(self.rPublication.lastpage))
-		self.publication.set('researchr_key', self.rPublication.key, strict=False)
-		self.publication['person'] = self.publicationPerson
-		print(self.publication)
+			self.rPublication.firstpage != "" and self.rPublication.lastpage != ""):
+			self.publication["pages"] = str(self.rPublication.firstpage) + " - " + str(self.rPublication.lastpage)
+
+		self.publication["language"] = self.rrsdb.load('language', 1)
+		self.publication.set("researchr_key", self.rPublication.key, strict=False)
+		#print(self.publication)
 		importer = RRSXMLImporter(self.importer_kwargs)
-		try:
-			importer.import_model(self.publication)
+		#try:
+		importer.import_model(self.publication)
+		"""
 		except RRSDatabaseEntityError as e:
-			logging.warning('RRSDatabaseEntityError - %s' % self.rPublication.key)
+			print('RRSDatabaseEntityError - %s, %s' % (self.rPublication.key, str(e)))
+			logging.warning('RRSDatabaseEntityError - %s, %s' % (self.rPublication.key, str(e)))
+		except DatabaseError as e:
+			print('DatabaseError - %s, %s' % (self.rPublication.key, str(e)))
+			logging.warning('DatabaseError - %s, %s' % (self.rPublication.key, str(e)))
+		except TypeError as e:
+			print('TypeError - %s, %s' % (self.rPublication.key, str(e)))
+			logging.warning('TypeError - %s, %s' % (self.rPublication.key, str(e)))
 		except:
-			logging.warning('Unexpected error - %s' % self.rPublication.key)
-		
+			print('Unexpected error - %s, %s' % (self.rPublication.key, sys.exc_info()[0]))
+				logging.warning('Unexpected error - %s, %s' % (self.rPublication.key, sys.exc_info()[0]))
+		"""
 
 	def __FillRPublication(self, name):
 		"""
@@ -250,10 +329,9 @@ class ResearchrPublicationFeeder:
 		@param key: Name od publication.	
 		"""
 		self.rPublication = RPublication()
-		#get data via api
 		publicationData = self.researchrClass.getPublication(name)
 		time.sleep(random.uniform(self.LimitMin, self.LimitMax))
-		print(publicationData)
+		#print(publicationData)
 		for key, value in publicationData.items():
 			if key == 'abstract':
 				self.rPublication.abstract = value
@@ -309,6 +387,8 @@ class ResearchrPublicationFeeder:
 		    		self.rPublication.year = value
 
 def main(argv):
+	"""
+	"""
 	#load config file
 	config = ConfigParser.RawConfigParser()
 	config.read('app.ini')
@@ -320,32 +400,38 @@ def main(argv):
 	importer_kwargs = {
 			'update_rule':  RRSDB_MISSING,      # jak se bude chovat updatovani radku pokud se vkladaji data do jiz existujiciho radku
 			'lookup_level': LOOKUP_PRECISE,    # uroven zanoreni pri vyhledavani shodnych entit na zaklade topologie
-			'logs':	 EXEC_LOG,	        # uroven logovani: informacni (status msg) a exekutivni log (update, insert)
-			'logfile':      'logfile.log',      # cesta a jmeno logovaciho souboru
-			'module':       'import rrslib.db.xmlimport',  # jmeno modulu, ktery s daty pracuje
+			'logs':	 EXEC_LOG,		# uroven logovani: informacni (status msg) a exekutivni log (update, insert)
+			'logfile':      None,      # cesta a jmeno logovaciho souboru
+			'module':       'rrs_import',  # jmeno modulu, ktery s daty pracuje
 			'schema':       'data_researchr_test'  # databazove schema, do ktereho hodlame data nahrat
 			}
 
 	db = PostgreSQLDatabase(importer_kwargs['logfile'])
-        db.connect(host=config.get("Database","host"),
-                dbname=config.get("Database","db"),
-                user=config.get("Database","user"),
-                password=config.get("Database","pass"))
-        db.set_schema(config.get("Database","schema"))
+	db.connect(host=config.get("Database","host"),
+		dbname=config.get("Database","db"),
+		user=config.get("Database","user"),
+		password=config.get("Database","pass"))
+	db.set_schema(config.get("Database","schema"))
 
 	# load names from file
-	names = loadFile(getParam(argv))
+	keys = loadFile(getParam(argv))
 	# foreach names
-	for name in names.split('\n'):
-		print(name)
-		if (checkIfImport(name) == None):
+	for key in keys.split('\n'):
+		print(key)
+		if (checkIfImport(key) == None):
 			feeder = ResearchrPublicationFeeder(config, importer_kwargs)
-			feeder.FillPublication(name)
+			feeder.FillPublication(key)
 
-def checkIfImport(name):
+def checkIfImport(key):
+	"""
+	Check if publication is in database.
+	
+	@type name: string
+	@param name: Key of publication.
+	"""
 	q = FluentSQLQuery()
 	q.select("id").from_table("publication")
-	q.where("researchr_key=", name)
+	q.where("researchr_key=", key)
 	q()
 	data = q.fetch_one()
 	return data
@@ -363,12 +449,17 @@ def loadFile(filename):
 	return data
 
 def getParam(argv):
-	 try:
+	"""
+	Process parameter
+		
+	
+	"""
+	try:
 		opts, args = getopt.getopt(argv,"hi:",["ifile="])
-	 except getopt.GetoptError:
+	except getopt.GetoptError:
 	 	print 'researchrFeed.py -i <inputfile>'
 	 	sys.exit(2)
-	 for opt, arg in opts:
+	for opt, arg in opts:
 		if opt == '-h':
 		      print 'researchrFeed.py -i <inputfile>'
 		      sys.exit(2)

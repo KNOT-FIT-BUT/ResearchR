@@ -58,16 +58,12 @@ class ResearchrPublicationFeeder:
 		#objekt typu RRSPublication, ktery po naplneni budeme importovat do db
 		self.publication = None
 
-		#informace o feederu
-		self.added = 0
-		self.deleted = 0
-
 		#nastaveni pro importer
 		self.importer_kwargs = importer_kwargs
 
 		#sleeper range
-		self.LimitMin = 0.5
-		self.LimitMax = 2
+		self.LimitMin = 0.1
+		self.LimitMax = 0.2
 
 		#objekt pro vytvareni sql dotazu
 		self.q = FluentSQLQuery()
@@ -103,6 +99,7 @@ class ResearchrPublicationFeeder:
 				_id = self.__GetId("publication_series", "title=", self.rPublication.series)
 				if (_id == None):
 					series = RRSPublication_series(title=self.rPublication.series)
+					#importer = RRSXMLImporter(self.importer_kwargs)
 					self.importer.import_model(series)
 					continue
 			self.publication["series"] = self.rrsdb.load("publication_series", _id)
@@ -143,8 +140,8 @@ class ResearchrPublicationFeeder:
 				if (_id == None):
 					organization = RRSOrganization(title=self.rPublication.publisher, 
 						title_normalized=normalized_title)
-					importer = RRSXMLImporter(self.importer_kwargs)
-					importer.import_model(organization)
+					#importer = RRSXMLImporter(self.importer_kwargs)
+					self.importer.import_model(organization)
 					continue
 				self.publication["publisher"] = self.rrsdb.load("organization", _id)
 
@@ -162,33 +159,18 @@ class ResearchrPublicationFeeder:
 		if (len(authorData) != 0):
 			rank = 0
 			for author in authorData:
-				keyAuthorExist = False
-				
-				"""
-				for key, value in author.items():
-					if (key == "author"):
-						keyAuthorExist = True
-				if keyAuthorExist is False:
-					rFullname = author["alias"]["name"]
-					rUrl = author["alias"]["url"]
-				else:
-					rFullname = author["person"]["fullname"]
-			       		rUrl = author["person"]["url"]
-				"""
 				if 'author' in author:
 					rFullname = author["person"]["fullname"]
 					rUrl = author["person"]["url"]
 				else:
 					rFullname = author["alias"]["name"]
 					rUrl = author["alias"]["url"]
-
 				personUrl = RRSRelationshipPersonUrl()
 				rank += 1
-				importer = RRSXMLImporter(self.importer_kwargs)
-				self.__FillUrl(personUrl, rUrl, importer)
-				self.__FillPerson(personUrl, rFullname, rank, isEditor, importer)
+				self.__FillUrl(personUrl, rUrl)
+				self.__FillPerson(personUrl, rFullname, rank, isEditor)
 
-	def __FillUrl(self, personUrl, rUrl, importer):
+	def __FillUrl(self, personUrl, rUrl):
 		"""
 		This function add url to db bind url to person 
 
@@ -210,7 +192,7 @@ class ResearchrPublicationFeeder:
 			personUrl.set_entity(url)
 			#print( personUrl)
 
-	def __FillPerson(self, personUrl, rFullname, rank, isEditor, importer):
+	def __FillPerson(self, personUrl, rFullname, rank, isEditor):
 		"""
 		This function try fill first name, middle name, last name of person.
 
@@ -233,13 +215,13 @@ class ResearchrPublicationFeeder:
 				self.__SetPersonNames(person, rFullname)
 				person["full_name_ascii"] = unicodedata.normalize('NFKD', rFullname).encode('ascii', 'ignore')
 				#importer = RRSXMLImporter(self.importer_kwargs)
-				print(person)
-				importer.import_model(person)
+				#print(person)
+				self.importer.import_model(person)
 				continue
 			publicationPerson = RRSRelationshipPersonPublication(author_rank=rank, editor=isEditor)
 			publicationPerson.set_entity(self.rrsdb.load("person", _id))
 			#print(publicationPerson)
-			self.publication['person'].append(publicationPerson)
+			self.publication['person'] = publicationPerson
 
 	def __SetPersonNames(self, person, rFullname):
 		"""
@@ -303,10 +285,9 @@ class ResearchrPublicationFeeder:
 		self.publication["language"] = self.rrsdb.load('language', 1)
 		self.publication.set("researchr_key", self.rPublication.key, strict=False)
 		#print(self.publication)
-		importer = RRSXMLImporter(self.importer_kwargs)
-		#try:
-		importer.import_model(self.publication)
-		"""
+		#importer = RRSXMLImporter(self.importer_kwargs)
+		try:
+			self.importer.import_model(self.publication)
 		except RRSDatabaseEntityError as e:
 			print('RRSDatabaseEntityError - %s, %s' % (self.rPublication.key, str(e)))
 			logging.warning('RRSDatabaseEntityError - %s, %s' % (self.rPublication.key, str(e)))
@@ -318,10 +299,9 @@ class ResearchrPublicationFeeder:
 			logging.warning('TypeError - %s, %s' % (self.rPublication.key, str(e)))
 		except:
 			print('Unexpected error - %s, %s' % (self.rPublication.key, sys.exc_info()[0]))
-				logging.warning('Unexpected error - %s, %s' % (self.rPublication.key, sys.exc_info()[0]))
-		"""
+			logging.warning('Unexpected error - %s, %s' % (self.rPublication.key, sys.exc_info()[0]))
 
-	def __FillRPublication(self, name):
+	def __FillRPublication(self, key):
 		"""
 		Fill rPublication object.
 
@@ -329,7 +309,7 @@ class ResearchrPublicationFeeder:
 		@param key: Name od publication.	
 		"""
 		self.rPublication = RPublication()
-		publicationData = self.researchrClass.getPublication(name)
+		publicationData = self.researchrClass.getPublication(key)
 		time.sleep(random.uniform(self.LimitMin, self.LimitMax))
 		#print(publicationData)
 		for key, value in publicationData.items():
@@ -388,6 +368,9 @@ class ResearchrPublicationFeeder:
 
 def main(argv):
 	"""
+	Main function.
+
+	
 	"""
 	#load config file
 	config = ConfigParser.RawConfigParser()
@@ -400,7 +383,7 @@ def main(argv):
 	importer_kwargs = {
 			'update_rule':  RRSDB_MISSING,      # jak se bude chovat updatovani radku pokud se vkladaji data do jiz existujiciho radku
 			'lookup_level': LOOKUP_PRECISE,    # uroven zanoreni pri vyhledavani shodnych entit na zaklade topologie
-			'logs':	 EXEC_LOG,		# uroven logovani: informacni (status msg) a exekutivni log (update, insert)
+			'logs':	 	EXEC_LOG,		# uroven logovani: informacni (status msg) a exekutivni log (update, insert)
 			'logfile':      None,      # cesta a jmeno logovaciho souboru
 			'module':       'rrs_import',  # jmeno modulu, ktery s daty pracuje
 			'schema':       'data_researchr_test'  # databazove schema, do ktereho hodlame data nahrat
@@ -415,6 +398,7 @@ def main(argv):
 
 	# load names from file
 	keys = loadFile(getParam(argv))
+
 	# foreach names
 	for key in keys.split('\n'):
 		print(key)
@@ -439,11 +423,14 @@ def checkIfImport(key):
 def loadFile(filename):
 	"""
 	Open file with publications names
+
+	@type fillename: string
+	@param fillename: Name of file with publications keys.
 	"""
 	try:
 		f = open(filename, 'r')
    	except IOError:
-		print 'cannot open %s' % filename
+		print "cannot open %s" % filename
 		exit(2)
 	data = f.read()
 	return data
@@ -451,8 +438,9 @@ def loadFile(filename):
 def getParam(argv):
 	"""
 	Process parameter
-		
-	
+
+	@type argv: string
+	@param argv: Argument of command line.
 	"""
 	try:
 		opts, args = getopt.getopt(argv,"hi:",["ifile="])
